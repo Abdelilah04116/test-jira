@@ -1,0 +1,232 @@
+# =============================================================================
+# Kubernetes Deployment - Jira QA AI Generator
+# =============================================================================
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jira-qa-ai
+  labels:
+    app: jira-qa-ai-generator
+
+---
+# ConfigMap for non-sensitive configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jira-qa-config
+  namespace: jira-qa-ai
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+  LLM_PROVIDER: "gemini"
+  JIRA_ACCEPTANCE_CRITERIA_FIELD: "description"
+  JIRA_TEST_SCENARIOS_MODE: "subtask"
+
+---
+# Secret for sensitive data
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jira-qa-secrets
+  namespace: jira-qa-ai
+type: Opaque
+stringData:
+  DATABASE_URL: "postgresql://user:password@postgres-service:5432/jira_qa_ai"
+  REDIS_URL: "redis://redis-service:6379/0"
+  JWT_SECRET_KEY: "your-production-secret-key"
+  JIRA_URL: "https://your-instance.atlassian.net"
+  JIRA_EMAIL: "your-email@company.com"
+  JIRA_API_TOKEN: "your-jira-api-token"
+  GEMINI_API_KEY: "your-gemini-api-key"
+  # CLAUDE_API_KEY: "your-claude-api-key"
+  # OPENAI_API_KEY: "your-openai-api-key"
+
+---
+# Backend Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jira-qa-backend
+  namespace: jira-qa-ai
+  labels:
+    app: jira-qa-backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: jira-qa-backend
+  template:
+    metadata:
+      labels:
+        app: jira-qa-backend
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/your-org/jira-qa-ai-generator:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: jira-qa-config
+            - secretRef:
+                name: jira-qa-secrets
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: tmp-volume
+              mountPath: /tmp
+            - name: logs-volume
+              mountPath: /app/logs
+      volumes:
+        - name: tmp-volume
+          emptyDir: {}
+        - name: logs-volume
+          emptyDir: {}
+
+---
+# Backend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: jira-qa-backend-service
+  namespace: jira-qa-ai
+spec:
+  selector:
+    app: jira-qa-backend
+  ports:
+    - port: 80
+      targetPort: 8000
+  type: ClusterIP
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: jira-qa-backend-hpa
+  namespace: jira-qa-ai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: jira-qa-backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+# Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jira-qa-ingress
+  namespace: jira-qa-ai
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+spec:
+  tls:
+    - hosts:
+        - jira-qa-api.your-domain.com
+      secretName: jira-qa-tls
+  rules:
+    - host: jira-qa-api.your-domain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jira-qa-backend-service
+                port:
+                  number: 80
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jira-qa-network-policy
+  namespace: jira-qa-ai
+spec:
+  podSelector:
+    matchLabels:
+      app: jira-qa-backend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: jira-qa-ai
+      ports:
+        - protocol: TCP
+          port: 5432  # PostgreSQL
+        - protocol: TCP
+          port: 6379  # Redis
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443  # HTTPS for external APIs
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: jira-qa-backend-pdb
+  namespace: jira-qa-ai
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: jira-qa-backend
