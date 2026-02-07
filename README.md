@@ -155,6 +155,6 @@ kubectl apply -f kubernetes/
 - Validation stricte des entrées
 - Logs d'audit complets
 
-## License
+## Realiser avec Abdelilah Ourti 
 
-MIT License - voir [LICENSE](LICENSE) pour plus de détails.
+
