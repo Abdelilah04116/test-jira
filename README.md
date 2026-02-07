@@ -162,6 +162,6 @@ kubectl apply -f kubernetes/
 - Validation stricte des entrées
 - Logs d'audit complets
 
-## Realiser avec Abdelilah Ourti 
+## Realiser par Abdelilah Ourti 
 
 
