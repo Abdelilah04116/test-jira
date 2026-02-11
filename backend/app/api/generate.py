@@ -168,6 +168,166 @@ async def run_full_pipeline(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/push-to-git")
+async def push_to_git(
+    request: dict,
+    current_user = Depends(get_current_user),
+    _: None = Depends(check_rate_limit)
+):
+    """
+    Push generated Playwright test files to Git repository
+    
+    - **issue_id**: Jira issue key (required)
+    - **test_suite**: Test suite with scenarios containing playwright_code (required)
+    
+    This endpoint:
+    1. Writes test files to the local workspace
+    2. Commits and pushes them to the configured Git repository
+    
+    Returns push result with commit hash and branch info.
+    """
+    from app.agents.gitops import GitOpsAgent
+    
+    issue_id = request.get("issue_id")
+    test_suite = request.get("test_suite")
+    
+    if not issue_id:
+        raise HTTPException(status_code=400, detail="issue_id is required")
+    if not test_suite or not test_suite.get("scenarios"):
+        raise HTTPException(status_code=400, detail="test_suite with scenarios is required")
+    
+    scenarios = test_suite.get("scenarios", [])
+    
+    # Filter scenarios that have playwright_code
+    pushable = [
+        {
+            "id": s.get("id", "TS-000"),
+            "title": s.get("title", "untitled"),
+            "playwright_code": s.get("playwright_code", ""),
+            "review_score": s.get("review_score"),
+        }
+        for s in scenarios
+        if s.get("playwright_code") and not s.get("playwright_code", "").startswith("// ⚠️")
+    ]
+    
+    if not pushable:
+        raise HTTPException(
+            status_code=400,
+            detail="No scenarios with valid Playwright code to push"
+        )
+    
+    gitops = GitOpsAgent()
+    
+    try:
+        # Step 1: Write test files
+        write_result = await gitops.write_test_files(
+            story_key=issue_id,
+            scenarios=pushable
+        )
+        
+        if not write_result["success"]:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to write test files: {write_result.get('errors', [])}"
+            )
+        
+        # Step 2: Git commit & push
+        push_result = await gitops.git_commit_and_push(
+            story_key=issue_id,
+            files_created=write_result["files_created"]
+        )
+        
+        logger.info(
+            f"User {current_user.email} pushed {len(pushable)} test files "
+            f"for {issue_id} to Git"
+        )
+        
+        return {
+            "success": push_result["success"],
+            "issue_id": issue_id,
+            "files_written": len(write_result["files_created"]),
+            "files_pushed": push_result["files_pushed"],
+            "branch": push_result["branch"],
+            "commit_hash": push_result.get("commit_hash"),
+            "repo_url": push_result.get("repo_url"),
+            "error": push_result.get("error"),
+            "write_errors": write_result.get("errors", []),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Push to Git failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/agentic-pipeline")
+async def run_agentic_pipeline(
+    request: FullPipelineRequest,
+    background_tasks: BackgroundTasks,
+    current_user = Depends(get_current_user),
+    _: None = Depends(check_rate_limit)
+):
+    """
+    Run the full **Multi-Agent Agentic Pipeline** 🤖
+    
+    This is the advanced version of the pipeline that uses multiple AI agents:
+    
+    1. **Orchestrator Agent** — Coordinates the entire workflow
+    2. **GherkinGenerator Agent** — Generates acceptance criteria
+    3. **TestGenerator Agent** — Creates test scenarios
+    4. **AutomationEngineer Agent** — Writes Playwright code
+    5. **CodeReviewer Agent** — Reviews code quality (AI-powered)
+    6. **GitOps Agent** — Creates test files + Git push
+    7. **Jira Publisher** — Publishes results to Jira
+    
+    - **issue_id**: Jira issue ID (required)
+    - **auto_publish**: Auto-publish to Jira (default: true)
+    - **llm_provider**: Override default LLM provider (optional)
+    
+    The pipeline runs in the **background** and returns immediately.
+    Use `/generate/pipeline-status` to check progress.
+    """
+    from app.agents.orchestrator import OrchestratorAgent
+    from app.core.config import settings
+    
+    async def _run_pipeline():
+        orchestrator = OrchestratorAgent(
+            llm_provider=request.llm_provider.value if request.llm_provider else None
+        )
+        try:
+            result = await orchestrator.run_full_agentic_pipeline(
+                issue_id=request.issue_id,
+                user_id=current_user.sub,
+                auto_publish=request.auto_publish,
+                auto_push_git=getattr(settings, 'git_auto_push', False),
+            )
+            return result
+        finally:
+            await orchestrator.jira_client.close()
+    
+    background_tasks.add_task(_run_pipeline)
+    
+    logger.info(
+        f"User {current_user.email} started agentic pipeline for {request.issue_id}"
+    )
+    
+    return {
+        "status": "accepted",
+        "message": f"Agentic pipeline started for {request.issue_id}",
+        "issue_id": request.issue_id,
+        "pipeline_type": "agentic_multi_agent",
+        "agents": [
+            "Orchestrator",
+            "GherkinGenerator",
+            "TestGenerator",
+            "AutomationEngineer",
+            "CodeReviewer",
+            "GitOps"
+        ]
+    }
+
+
 @router.get("/providers")
 async def get_available_providers(
     current_user = Depends(get_current_user)
@@ -198,3 +358,4 @@ async def check_llm_health():
         return {"status": "ok", "providers": health}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+

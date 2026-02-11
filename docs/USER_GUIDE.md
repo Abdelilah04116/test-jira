@@ -272,6 +272,28 @@ curl -X POST "https://api.jira-qa.company.com/api/v1/generate/full-pipeline" \
 3. 🧪 Génère les scénarios de test
 4. 📤 Publie automatiquement dans Jira
 
+### 6. Pipeline Multi-Agent Agentique (Avancé) 🤖
+
+Il utilise une architecture multi-agent pour non seulement générer du contenu, mais aussi le réviser, le valider et l'intégrer dans votre code.
+
+**Agents activés :**
+1.  **Orchestrator Agent** 🧠 : Coordonne tout le workflow et gère la télémétrie.
+2.  **GherkinGenerator Agent** 📝 : Analyse la story et génère les critères (Gherkin).
+3.  **TestGenerator Agent** 🧪 : Planifie la stratégie de test.
+4.  **AutomationEngineer Agent** 💻 : Écrit le code Playwright (TypeScript).
+5.  **CodeReviewer Agent** 🔍 : (IA) Révision du code, vérification de la robustesse.
+6.  **GitOps Agent** 🚀 : Crée les fichiers `.spec.ts` et les pousse dans Git.
+7.  **JiraPublisher** 📤 : Synchronise tout avec Jira.
+
+**Configuration requise (`.env`) :**
+
+```bash
+GIT_REPO_URL=https://github.com/votre-org/votre-repo-tests.git
+GIT_TOKEN=votre_personal_access_token
+GIT_AUTO_PUSH=true
+```
+
+
 ## Choix du LLM
 
 L'application supporte plusieurs modèles d'IA :

@@ -33,7 +33,7 @@ class GeminiClient(BaseLLMClient):
         
         # force default model
         if not self.config.model or self.config.model == "default":
-            self.config.model = "gemini-3-flash-preview"
+            self.config.model = "gemini-1.5-flash"
         
         # Generation config
         self.generation_config = GenerationConfig(

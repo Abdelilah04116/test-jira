@@ -136,6 +136,42 @@ class Settings(BaseSettings):
     slack_webhook_url: Optional[str] = Field(default=None)
     
     # ==========================================================================
+    # Git Repository (for GitOps Agent)
+    # ==========================================================================
+    git_repo_url: Optional[str] = Field(
+        default=None,
+        description="Git repository URL for pushing generated tests"
+    )
+    git_token: Optional[str] = Field(
+        default=None,
+        description="Git access token (PAT) for authentication"
+    )
+    git_tests_workspace: str = Field(
+        default="generated_tests",
+        description="Local workspace directory for generated test files"
+    )
+    git_tests_path: str = Field(
+        default="tests/e2e/generated",
+        description="Path within the repo where test files will be placed"
+    )
+    git_auto_push: bool = Field(
+        default=False,
+        description="Automatically push generated tests to Git"
+    )
+    
+    # ==========================================================================
+    # Azure DevOps Configuration
+    # ==========================================================================
+    azure_devops_url: str = Field(default="https://dev.azure.com")
+    azure_devops_org: Optional[str] = Field(default=None)
+    azure_devops_project: Optional[str] = Field(default=None)
+    azure_devops_pat: Optional[str] = Field(default=None)
+    
+    # Azure DevOps Field Mapping
+    azure_devops_ac_field: str = Field(default="Microsoft.VSTS.Common.AcceptanceCriteria")
+    azure_devops_desc_field: str = Field(default="System.Description")
+    
+    # ==========================================================================
     # Feature Flags
     # ==========================================================================
     feature_auto_publish: bool = Field(default=True)

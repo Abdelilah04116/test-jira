@@ -3,13 +3,21 @@ Jira Integration Client
 REST API client for Jira Cloud/Server
 """
 
+import os
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+# Fix SSL certificate issue caused by PostgreSQL overriding the CA bundle path.
+# PostgreSQL 18 sets SSL_CERT_FILE to its own ca-bundle.crt which may not exist,
+# breaking all HTTPS requests made by the 'requests' library.
+import certifi
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
 import httpx
 from jira import JIRA, JIRAError
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type
 
 from app.core.config import settings
 from app.models.schemas import (
@@ -82,7 +90,8 @@ class JiraClient:
     
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10)
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_not_exception_type((ValueError, PermissionError))
     )
     async def get_issue(self, issue_id: str) -> JiraStory:
         """
@@ -148,11 +157,11 @@ class JiraClient:
             
         except JIRAError as e:
             if e.status_code == 404:
-                raise ValueError(f"Issue {issue_id} not found")
+                raise ValueError(f"Issue {issue_id} not found on {self.url}. Original error: {e.text}")
             elif e.status_code == 403:
-                raise PermissionError(f"Access denied to issue {issue_id}")
+                raise PermissionError(f"Access denied to issue {issue_id} on {self.url}. Check your permissions.")
             else:
-                raise RuntimeError(f"Failed to fetch issue: {e.text}")
+                raise RuntimeError(f"Failed to fetch issue {issue_id}: {e.text}")
     
     async def search_issues(
         self,

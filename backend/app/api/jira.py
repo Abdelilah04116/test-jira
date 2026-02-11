@@ -179,30 +179,42 @@ async def get_custom_fields(
 
 async def process_webhook_background(issue_id: str, issue_key: str):
     """
-    Background task to process webhook event
+    Background task to process webhook event via the Orchestrator Agent.
+    
+    This triggers the full multi-agent agentic pipeline:
+      1. Fetch Story → 2. Generate AC → 3. Generate Tests
+      4. AutomationEngineer → 5. CodeReviewer → 6. GitOps → 7. Jira Publish
     """
-    logger.info(f"Background webhook processing started for {issue_key}")
+    from app.agents.orchestrator import OrchestratorAgent
+    from app.core.config import settings
+    
+    logger.info(f"🚀 Webhook received — Starting Agentic Pipeline for {issue_key}")
     
     try:
-        # Initialize service (creates its own JiraClient)
-        service = QAGeneratorService()
+        orchestrator = OrchestratorAgent()
         
-        request = FullPipelineRequest(
+        result = await orchestrator.run_full_agentic_pipeline(
             issue_id=issue_key,
             user_id="system-webhook",
-            llm_provider=None, # Use default
             auto_publish=True,
+            auto_push_git=getattr(settings, 'git_auto_push', False),
             publish_mode=JiraPublishMode.SUBTASK,
-            generate_tests=True
         )
         
-        await service.run_full_pipeline(request)
+        await orchestrator.jira_client.close()
         
-        await service.jira_client.close()
-        logger.info(f"Background processing completed for {issue_key}")
+        if result.get("success"):
+            logger.info(
+                f"✅ Agentic Pipeline completed for {issue_key} "
+                f"in {result.get('total_processing_time_seconds', 0):.2f}s — "
+                f"Files: {len(result.get('git_result', {}).get('files_created', []))}, "
+                f"Reviews: {len(result.get('code_reviews', []))}"
+            )
+        else:
+            logger.warning(f"⚠️ Agentic Pipeline partially failed for {issue_key}")
         
     except Exception as e:
-        logger.error(f"Background webhook processing failed for {issue_key}: {e}")
+        logger.error(f"❌ Agentic Pipeline failed for {issue_key}: {e}")
 
 
 @router.post("/webhook")

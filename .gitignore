@@ -85,3 +85,8 @@ tmp/
 temp/
 backend/debug_fields.py
 backend/debug_statuses.py
+
+# Generated Test Files (GitOps Agent workspace)
+generated_tests/
+backend/generated_tests/
+

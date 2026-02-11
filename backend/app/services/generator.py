@@ -303,20 +303,17 @@ class QAGeneratorService:
                 estimated_duration_minutes=ts.get("estimated_duration_minutes", 5)
             ))
             
-        # Generate Playwright code for each scenario regarding user request
+        # Generate Playwright code sequentially to avoid rate limits
         logger.info(f"Generating Playwright code with AutomationEngineerAgent for {len(scenarios)} scenarios...")
         
         # Instantiate the specialist agent
         automation_agent = AutomationEngineerAgent(llm)
         
-        code_tasks = []
-        for scenario in scenarios:
-            code_tasks.append(automation_agent.generate_code(scenario))
-        
-        if code_tasks:
-            codes = await asyncio.gather(*code_tasks)
-            for scenario, code in zip(scenarios, codes):
-                scenario.playwright_code = code
+        for i, scenario in enumerate(scenarios):
+            if i > 0:
+                await asyncio.sleep(2)  # Delay between calls to avoid rate limits
+            code = await automation_agent.generate_code(scenario)
+            scenario.playwright_code = code
         
         test_suite = TestSuite(
             story_key=story_key,

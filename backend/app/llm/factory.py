@@ -86,7 +86,7 @@ class LLMFactory:
     def _get_default_config(cls, provider: str) -> LLMConfig:
         """Get default config for provider from settings"""
         model_map = {
-            "gemini": "gemini-3-flash-preview", # Force user requested model
+            "gemini": settings.llm_gemini_model,
             "claude": settings.llm_claude_model,
             "openai": settings.llm_openai_model,
         }
