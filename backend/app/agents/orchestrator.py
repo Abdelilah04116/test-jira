@@ -57,6 +57,7 @@ from app.azure_devops.client import AzureDevOpsClient
 from app.agents.automation_engineer import AutomationEngineerAgent
 from app.agents.code_reviewer import CodeReviewerAgent
 from app.agents.gitops import GitOpsAgent
+from app.agents.context import ContextAgent
 from app.models.database import GenerationHistory
 from app.models.schemas import (
     FullPipelineRequest,
@@ -200,7 +201,8 @@ class OrchestratorAgent:
                 "TestGenerator",
                 "AutomationEngineer",
                 "CodeReviewer",
-                "GitOps"
+                "GitOps",
+                "ContextDiscovery"
             ]
         }
         
@@ -265,6 +267,37 @@ class OrchestratorAgent:
                 "positive": test_suite.positive_count,
                 "negative": test_suite.negative_count
             })
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # STEP 3.5: Context Discovery (UiContextAgent)
+            # ═══════════════════════════════════════════════════════════════════
+            step_context = PipelineStep("ui_context", "Discovering UI context from repository")
+            self.steps.append(step_context)
+            step_context.start()
+            
+            context_agent = ContextAgent(repo_path=settings.local_repo_path)
+            ui_context = await context_agent.get_ui_context(story.summary, story.description or "")
+            
+            step_context.complete({"findings": ui_context[:100] + "..." if len(ui_context) > 100 else ui_context})
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # STEP 3.6: Generate Code with Context
+            # ═══════════════════════════════════════════════════════════════════
+            step_code = PipelineStep("generate_code", "Generating Playwright code with codebase context")
+            self.steps.append(step_code)
+            step_code.start()
+            
+            automation_agent = AutomationEngineerAgent(self._get_llm())
+            
+            # Update Automation agent with context for all scenarios
+            # (In a real scenario, we might want to inject this per scenario)
+            for scenario in test_suite.scenarios:
+                # Add context to scenario description or pass as extra
+                scenario.description = f"{scenario.description}\n\n[CODEBASE CONTEXT]\n{ui_context}"
+                code = await automation_agent.generate_code(scenario)
+                scenario.playwright_code = code
+                
+            step_code.complete({"scenarios_coded": len(test_suite.scenarios)})
             
             # ═══════════════════════════════════════════════════════════════════
             # STEP 4: Code Review (CodeReviewer Agent)
@@ -361,7 +394,8 @@ class OrchestratorAgent:
                 
                 git_result = await gitops.git_commit_and_push(
                     story_key=issue_id,
-                    files_created=write_result.get("files_created", [])
+                    files_created=write_result.get("files_created", []),
+                    provider="github" # Default for auto-push
                 )
                 pipeline_result["git_result"] = git_result
                 
@@ -418,6 +452,9 @@ class OrchestratorAgent:
             # ═══════════════════════════════════════════════════════════════════
             # FINALIZE
             # ═══════════════════════════════════════════════════════════════════
+            # Update final artifacts in the result (ensuring encoded versions include all generated code/reviews)
+            pipeline_result["test_suite"] = jsonable_encoder(test_suite)
+            pipeline_result["acceptance_criteria"] = jsonable_encoder(acceptance_criteria)
             pipeline_result["success"] = True
             
         except Exception as e:

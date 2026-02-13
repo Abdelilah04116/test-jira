@@ -37,7 +37,8 @@ class JiraClient:
         self,
         url: Optional[str] = None,
         email: Optional[str] = None,
-        api_token: Optional[str] = None
+        api_token: Optional[str] = None,
+        project_key: Optional[str] = None
     ):
         """
         Initialize Jira client
@@ -46,10 +47,12 @@ class JiraClient:
             url: Jira instance URL
             email: Jira user email
             api_token: Jira API token
+            project_key: Default project key to use if only numeric ID provided
         """
         self.url = url or settings.jira_url
         self.email = email or settings.jira_email
         self.api_token = api_token or settings.jira_api_token
+        self.project_key = project_key or settings.jira_project_key
         
         # Initialize JIRA client lazily to avoid connection errors on startup
         try:
@@ -107,6 +110,13 @@ class JiraClient:
             JIRAError: If issue not found or access denied
         """
         try:
+            # If issue_id is numeric and we have a project key, prefix it
+            if issue_id.isdigit() and self.project_key:
+                old_id = issue_id
+                issue_id = f"{self.project_key}-{issue_id}"
+                from loguru import logger
+                logger.info(f"Numeric ID detected: {old_id} -> Using {issue_id}")
+
             # Fetch issue with expand for more fields
             issue = self.jira.issue(
                 issue_id,

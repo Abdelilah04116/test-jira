@@ -4,7 +4,7 @@ Centralized configuration management using Pydantic Settings
 """
 
 from functools import lru_cache
-from typing import List, Optional
+from typing import List, Optional, Any
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -146,6 +146,16 @@ class Settings(BaseSettings):
         default=None,
         description="Git access token (PAT) for authentication"
     )
+    
+    # GitHub Configuration
+    github_repo_url: Optional[str] = Field(
+        default=None,
+        description="GitHub repository URL"
+    )
+    github_token: Optional[str] = Field(
+        default=None,
+        description="GitHub Personal Access Token"
+    )
     git_tests_workspace: str = Field(
         default="generated_tests",
         description="Local workspace directory for generated test files"
@@ -158,6 +168,23 @@ class Settings(BaseSettings):
         default=False,
         description="Automatically push generated tests to Git"
     )
+
+    # Repository Analysis Context
+    local_repo_path: Optional[str] = Field(
+        default=None,
+        description="Local path to the repository for context analysis"
+    )
+    scan_excludes: Any = Field(
+        default=["node_modules", ".git", "dist", "build", "venv", ".next", ".pytest_cache", "__pycache__", "coverage"],
+        description="List of directories/files to exclude from repository scanning"
+    )
+
+    @field_validator("scan_excludes", mode="before")
+    @classmethod
+    def parse_scan_excludes(cls, v: Any) -> List[str]:
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
     
     # ==========================================================================
     # Azure DevOps Configuration
@@ -170,6 +197,12 @@ class Settings(BaseSettings):
     # Azure DevOps Field Mapping
     azure_devops_ac_field: str = Field(default="Microsoft.VSTS.Common.AcceptanceCriteria")
     azure_devops_desc_field: str = Field(default="System.Description")
+    
+    # Azure Repo
+    azure_repo_url: Optional[str] = Field(
+        default=None,
+        description="Azure DevOps Git repository URL"
+    )
     
     # ==========================================================================
     # Feature Flags

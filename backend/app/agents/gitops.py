@@ -15,12 +15,14 @@ import os
 import re
 import asyncio
 import shutil
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 from loguru import logger
 from app.core.config import settings
+import stat
 
 
 class GitOpsAgent:
@@ -39,9 +41,31 @@ class GitOpsAgent:
     
     def __init__(self):
         self.name = "GitOpsAgent"
-        self.workspace_base = Path(settings.git_tests_workspace)
+        # Use absolute path to avoid path confusion during Git operations
+        self.workspace_base = Path(settings.git_tests_workspace).absolute()
         self.workspace_base.mkdir(parents=True, exist_ok=True)
     
+    def _cleanup_dir(self, path: Path):
+        """Robustly delete a directory, handling read-only files (common in .git)."""
+        if not path.exists():
+            return
+            
+        def on_error(func, path, exc_info):
+            """Error handler for shutil.rmtree to handle read-only files."""
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except Exception as e:
+                logger.warning(f"[{self.name}] Failed to delete {path}: {e}")
+
+        try:
+            if path.is_dir():
+                shutil.rmtree(str(path), onerror=on_error)
+            else:
+                os.remove(str(path))
+        except Exception as e:
+            logger.warning(f"[{self.name}] Cleanup failed for {path}: {e}")
+
     def _sanitize_filename(self, title: str) -> str:
         """Convert a scenario title to a valid filename."""
         name = title.lower()
@@ -238,26 +262,26 @@ class GitOpsAgent:
         self,
         story_key: str,
         files_created: List[Dict],
+        provider: str = "github",
         repo_url: Optional[str] = None,
         branch: Optional[str] = None,
         token: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Commit and push generated test files to a Git repository.
-        
-        Args:
-            story_key: Jira story key
-            files_created: List of created file dicts
-            repo_url: Git repository URL (defaults to config)
-            branch: Target branch (defaults to "ai-tests/{story_key}")
-            token: Git authentication token
-            
-        Returns:
-            Result dict with commit info
         """
-        repo_url = repo_url or getattr(settings, 'git_repo_url', None)
-        token = token or getattr(settings, 'git_token', None)
-        branch = branch or f"ai-tests/{story_key.lower()}"
+        # Determine settings based on provider
+        if provider.lower() == "github":
+            repo_url = repo_url or getattr(settings, 'github_repo_url', None) or getattr(settings, 'git_repo_url', None)
+            token = token or getattr(settings, 'github_token', None) or getattr(settings, 'git_token', None)
+        elif provider.lower() == "azure":
+            repo_url = repo_url or getattr(settings, 'azure_repo_url', None)
+            token = token or getattr(settings, 'azure_devops_pat', None) or getattr(settings, 'git_token', None)
+        else:
+            repo_url = repo_url or getattr(settings, 'git_repo_url', None)
+            token = token or getattr(settings, 'git_token', None)
+
+        branch = branch or f"ai-tests/{story_key.lower()}-{provider.lower()}"
         
         result = {
             "success": False,
@@ -265,18 +289,19 @@ class GitOpsAgent:
             "commit_hash": None,
             "files_pushed": len(files_created),
             "repo_url": repo_url,
+            "provider": provider,
             "error": None
         }
         
         if not repo_url:
-            result["error"] = "No Git repository URL configured (GIT_REPO_URL)"
+            result["error"] = f"No Git repository URL configured for {provider}"
             logger.warning(f"[{self.name}] {result['error']}")
             return result
         
         try:
             # Build authenticated URL
             if token and "github.com" in repo_url:
-                auth_url = repo_url.replace("https://", f"https://x-access-token:{token}@")
+                auth_url = repo_url.replace("https://", f"https://{token}@")
             elif token and "gitlab" in repo_url:
                 auth_url = repo_url.replace("https://", f"https://oauth2:{token}@")
             elif token and ("dev.azure.com" in repo_url or "visualstudio.com" in repo_url):
@@ -287,20 +312,34 @@ class GitOpsAgent:
             else:
                 auth_url = repo_url
             
-            clone_dir = self.workspace_base / ".git_repo"
+            repo_folder = f".git_repo_{provider}"
+            clone_dir = self.workspace_base / repo_folder
             
             # Clone or pull
-            if clone_dir.exists():
-                # Pull latest changes
-                await self._run_git(clone_dir, "git", "fetch", "origin")
-                await self._run_git(clone_dir, "git", "checkout", "main")
-                await self._run_git(clone_dir, "git", "pull", "origin", "main")
+            if clone_dir.exists() and (clone_dir / ".git").exists():
+                try:
+                    # Pull latest changes
+                    await self._run_git(clone_dir, "git", "fetch", "origin")
+                    await self._run_git(clone_dir, "git", "checkout", "main")
+                    await self._run_git(clone_dir, "git", "pull", "origin", "main")
+                except Exception as e:
+                    logger.warning(f"[{self.name}] Repo fetch/pull failed, re-cloning: {e}")
+                    self._cleanup_dir(clone_dir)
+                    await self._run_git(
+                        self.workspace_base,
+                        "git", "clone", "--depth", "1", auth_url, repo_folder
+                    )
             else:
                 # Fresh clone
+                self._cleanup_dir(clone_dir) # Ensure it's clean even if exists() returned False
                 await self._run_git(
                     self.workspace_base,
-                    "git", "clone", "--depth", "1", auth_url, str(clone_dir)
+                    "git", "clone", "--depth", "1", auth_url, repo_folder
                 )
+            
+            # Configure Git user for this repo
+            await self._run_git(clone_dir, "git", "config", "user.name", "AI Agent")
+            await self._run_git(clone_dir, "git", "config", "user.email", "agent@jira-qa-ai.internal")
             
             # Create and checkout branch
             try:
@@ -316,7 +355,7 @@ class GitOpsAgent:
             source_dir = self.workspace_base / story_key.lower().replace("-", "_")
             if source_dir.exists():
                 for src_file in source_dir.iterdir():
-                    shutil.copy2(str(src_file), str(target_dir / src_file.name))
+                    shutil.copy2(src_file, target_dir / src_file.name)
             
             # Git add, commit, push
             await self._run_git(clone_dir, "git", "add", "-A")
@@ -326,10 +365,17 @@ class GitOpsAgent:
                 f"Generated by AI Agentic Pipeline\n"
                 f"- Story: {story_key}\n"
                 f"- Files: {len(files_created)}\n"
-                f"- Pipeline: Story → AC → Scenarios → Code → Review → GitOps\n"
+                f"- Provider: {provider}\n"
                 f"- Timestamp: {datetime.now(timezone.utc).isoformat()}"
             )
             
+            # Check if there are changes to commit
+            status = await self._run_git_output(clone_dir, "git", "status", "--porcelain")
+            if not status:
+                result["success"] = True
+                result["error"] = "No changes to commit"
+                return result
+
             await self._run_git(clone_dir, "git", "commit", "-m", commit_msg)
             await self._run_git(clone_dir, "git", "push", "origin", branch)
             
@@ -343,36 +389,59 @@ class GitOpsAgent:
             
             logger.info(
                 f"[{self.name}] ✅ Pushed {len(files_created)} files to "
-                f"{repo_url} on branch {branch}"
+                f"{repo_url} on branch {branch} ({provider})"
             )
             
         except Exception as e:
-            result["error"] = str(e)
-            logger.error(f"[{self.name}] ❌ Git push failed: {e}")
+            import traceback
+            error_details = traceback.format_exc()
+            result["error"] = str(e) or "Unknown Git error"
+            logger.error(f"[{self.name}] ❌ Git push failed for {provider}: {result['error']}\n{error_details}")
         
         return result
     
     async def _run_git(self, cwd: Path, *args) -> None:
-        """Run a git command."""
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=str(cwd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
+        """Run a git command using thread-safe subprocess for Windows compatibility."""
+        command_str = ' '.join(args)
+        if "clone" in args and "https://" in command_str and "@" in command_str:
+            display_cmd = re.sub(r'https://[^@]+@', 'https://****@', command_str)
+        else:
+            display_cmd = command_str
+            
+        def _exec():
+            return subprocess.run(
+                args,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace'
+            )
+
+        # Run in thread pool to avoid blocking event loop and bypass Proactor issues
+        proc_result = await asyncio.to_thread(_exec)
         
-        if proc.returncode != 0:
-            error = stderr.decode().strip()
-            raise RuntimeError(f"Git command failed: {' '.join(args)}: {error}")
+        if proc_result.returncode != 0:
+            error = proc_result.stderr.strip()
+            stdout_msg = proc_result.stdout.strip()
+            raise RuntimeError(f"Git failed: {display_cmd} | Error: {error} | Out: {stdout_msg}")
     
     async def _run_git_output(self, cwd: Path, *args) -> str:
         """Run a git command and return stdout."""
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=str(cwd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        return stdout.decode().strip()
+        def _exec():
+            return subprocess.run(
+                args,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace'
+            )
+
+        proc_result = await asyncio.to_thread(_exec)
+        
+        if proc_result.returncode != 0:
+            error = proc_result.stderr.strip()
+            logger.warning(f"Git command '{' '.join(args)}' returned {proc_result.returncode}: {error}")
+            
+        return proc_result.stdout.strip()

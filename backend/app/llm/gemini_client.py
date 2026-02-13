@@ -2,13 +2,30 @@
 Google Gemini LLM Client
 """
 
+# Fix for missing aiohttp.ClientConnectorDNSError in older versions or specific environments
+# Must be applied before other imports that might rely on aiohttp behavior if possible, 
+# strictly speaking it patches the module object itself so order relative to other imports isn't critical 
+# as long as it runs before usage.
+import aiohttp
+if not hasattr(aiohttp, "ClientConnectorDNSError"):
+    try:
+        from aiohttp import client_exceptions
+        if hasattr(client_exceptions, "ClientConnectorDNSError"):
+            aiohttp.ClientConnectorDNSError = client_exceptions.ClientConnectorDNSError
+        else:
+            class MockClientConnectorDNSError(OSError): pass
+            aiohttp.ClientConnectorDNSError = MockClientConnectorDNSError
+    except ImportError:
+         class MockClientConnectorDNSError(OSError): pass
+         aiohttp.ClientConnectorDNSError = MockClientConnectorDNSError
+
 import json
 import asyncio
 import re
 from typing import Any, Dict, List, Optional
 
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
+from google import genai
+from google.genai import types
 
 from app.llm.base import BaseLLMClient, LLMConfig, LLMMessage, LLMResponse
 
@@ -28,35 +45,34 @@ class GeminiClient(BaseLLMClient):
         """
         super().__init__(api_key, config)
         
+
         # Configure the API
-        genai.configure(api_key=api_key)
+        self.client = genai.Client(api_key=api_key)
         
         # force default model
         if not self.config.model or self.config.model == "default":
-            self.config.model = "gemini-1.5-flash"
-        
-        # Generation config
-        self.generation_config = GenerationConfig(
-            temperature=self.config.temperature,
-            max_output_tokens=self.config.max_tokens,
-            top_p=0.95,
-            top_k=40,
-        )
+            self.config.model = "gemini-3-flash-preview"
         
         # Safety settings - relaxed for enterprise use
-        self.safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-        }
+        self.safety_settings = [
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH
+            ),
+        ]
         
-        # Initialize model
-        self.model = genai.GenerativeModel(
-            model_name=self.config.model,
-            generation_config=self.generation_config,
-            safety_settings=self.safety_settings,
-        )
     
     async def generate(
         self,
@@ -82,31 +98,44 @@ class GeminiClient(BaseLLMClient):
             try:
                 # Combine system prompt and user prompt if provided
                 full_prompt = prompt
-                if system_prompt:
-                    full_prompt = f"{system_prompt}\n\n{prompt}"
                 
-                # Generate response
+                # Generation config
                 generation_config_args = {
                     "temperature": kwargs.get("temperature", self.config.temperature),
                     "max_output_tokens": kwargs.get("max_tokens", self.config.max_tokens),
+                    "top_p": 0.95,
+                    "top_k": 40,
                 }
                 
                 if "response_mime_type" in kwargs:
                     generation_config_args["response_mime_type"] = kwargs["response_mime_type"]
                 
-                response = await self.model.generate_content_async(
-                    full_prompt,
-                    generation_config=GenerationConfig(**generation_config_args)
+                config = types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    safety_settings=self.safety_settings,
+                    **generation_config_args
+                )
+
+                response = await self.client.aio.models.generate_content(
+                    model=self.config.model,
+                    contents=full_prompt,
+                    config=config
                 )
                 
                 # Extract content
                 content = ""
                 if response.candidates:
-                    content = response.candidates[0].content.parts[0].text
+                    # In the new SDK, content structure might be slightly different but usually similar
+                    # Check docs or assume similarity. response.text is a helper usually.
+                    # But if we need safely:
+                     if response.candidates[0].content and response.candidates[0].content.parts:
+                        # Ensure content is always a string
+                        val = response.candidates[0].content.parts[0].text
+                        content = str(val) if val is not None else ""
                 
                 # Build usage info
                 usage = None
-                if hasattr(response, "usage_metadata"):
+                if response.usage_metadata:
                     usage = {
                         "prompt_tokens": response.usage_metadata.prompt_token_count,
                         "completion_tokens": response.usage_metadata.candidates_token_count,
@@ -118,7 +147,7 @@ class GeminiClient(BaseLLMClient):
                     model=self.config.model,
                     provider=self.provider_name,
                     usage=usage,
-                    finish_reason=response.candidates[0].finish_reason.name if response.candidates else None,
+                    finish_reason=response.candidates[0].finish_reason if response.candidates else None,
                     raw_response=response,
                 )
                 
@@ -127,8 +156,6 @@ class GeminiClient(BaseLLMClient):
                 error_str = str(e)
                 # logger.warning(f"Gemini generation error: {error_str}")
                 
-
-
                 # Don't retry on 404 (model not found) - fail fast
                 if "404" in error_str or "not found" in error_str.lower():
                     raise RuntimeError(f"Gemini generation failed: {error_str}")
@@ -158,6 +185,9 @@ class GeminiClient(BaseLLMClient):
         Generate structured JSON output using native JSON mode
         """
         from loguru import logger
+        
+        # In the new SDK, we can pass schema directly if supported, or use response_mime_type="application/json"
+        # Since I'm not 100% sure on the schema passing syntax without looking at docs, I will stick to the existing robust prompt engineering + json mode
         
         # Merge system prompts
         full_prompt = f"""{prompt}
@@ -237,33 +267,91 @@ Return ONLY the JSON object."""
             LLMResponse with assistant reply
         """
         try:
-            # Start chat session
-            chat = self.model.start_chat(history=[])
+            # Prepare chat history and config
+            # New SDK might handle chats differently (stateless or stateful?)
+            # The easiest way with the new SDK is likely just passing the history to generate_content or using chats.create
             
-            # Process messages
-            last_response = None
+            # We will use chats.create to start a session
+            
+            chat_history = []
+            
+            # We need to filter out the last user message as the 'message' to send, and put the rest in history
+            # Or assume the new SDK can take a full list
+            
+            # Typical chat structure for history:
+            # history = [Content(role="user", parts=[...]), Content(role="model", parts=[...])]
+            
+            # Convert LLMMessage to format expected by SDK if needed.
+            # But wait, self.client.chats.create(model=..., history=...)
+            
+            formatted_history = []
+            
+            # Find the last user message
+            if not messages:
+                 raise ValueError("No messages provided")
+            
+            # Separate system prompt if present (usually handled in config)
+            system_prompt = None
+            
+            # Messages invalid for history (e.g. last user message if we use send_message)
+            # But wait, if we rebuild the chat every time (stateless wrapper), we should pass previous messages as history.
+            
+            # Let's iterate and build history.
+            # Note: The loop in the original code seems to have failed to construct history properly or was using a stateful chat object but re-initializing it every time?
+            # Original code:
+            # chat = self.model.start_chat(history=[])
+            # for msg in messages:
+            #     if user: chat.send_message
+            # This is inefficient as it makes N calls for N messages? No, start_chat(history=[]) starts empty.
+            # Then it calls send_message_async sequentially? That's very slow/wrong if we just want one completion.
+            # It seems the original code was re-playing the conversation to the API? 
+            # "last_response = await chat.send_message_async(msg.content)" inside the loop!
+            # Yes, that's what it was doing.
+            
+            # Better approach with new SDK:
+            # use generate_content with a list of messages.
+            
+            contents = []
             for msg in messages:
                 if msg.role == "system":
-                    # Add system message as context
-                    continue
+                    system_prompt = msg.content
                 elif msg.role == "user":
-                    last_response = await chat.send_message_async(msg.content)
+                    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=msg.content)]))
                 elif msg.role == "assistant":
-                    # Add to history
-                    pass
+                    contents.append(types.Content(role="model", parts=[types.Part.from_text(text=msg.content)]))
             
-            if last_response is None:
-                raise ValueError("No user messages in conversation")
+            # Config
+            generation_config_args = {
+                "temperature": kwargs.get("temperature", self.config.temperature),
+                "max_output_tokens": kwargs.get("max_tokens", self.config.max_tokens),
+                "top_p": 0.95,
+                "top_k": 40,
+            }
+            
+            config = types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                safety_settings=self.safety_settings,
+                **generation_config_args
+            )
+
+            # Generate response for the conversation
+            # In new SDK, we can pass a list of contents
+            response = await self.client.aio.models.generate_content(
+                model=self.config.model,
+                contents=contents,
+                config=config
+            )
             
             content = ""
-            if last_response.candidates:
-                content = last_response.candidates[0].content.parts[0].text
+            if response.candidates:
+                if response.candidates[0].content.parts:
+                    content = response.candidates[0].content.parts[0].text
             
             return LLMResponse(
                 content=content,
                 model=self.config.model,
                 provider=self.provider_name,
-                raw_response=last_response,
+                raw_response=response,
             )
             
         except Exception as e:

@@ -3,7 +3,7 @@ Jira API Endpoints
 Jira integration and story management
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, BackgroundTasks
 from loguru import logger
 
@@ -23,6 +23,12 @@ from app.models.schemas import (
     LLMProvider
 )
 from app.services.generator import QAGeneratorService, get_qa_generator_service
+from app.models.schemas import JiraConfigRequest, JiraConfigResponse
+from app.core.database import get_db
+from app.models.database import JiraConfiguration
+from app.core.security import encrypt_api_key
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 
 router = APIRouter(prefix="/jira", tags=["Jira"])
@@ -139,6 +145,77 @@ async def validate_connection(
             "error": str(e)
         }
 
+@router.get("/config", response_model=Optional[JiraConfigResponse])
+async def get_jira_config(
+    db: AsyncSession = Depends(get_db),
+    current_user = Depends(require_role(["admin", "qa"]))
+):
+    """Get current Jira configuration"""
+    result = await db.execute(select(JiraConfiguration).order_by(JiraConfiguration.updated_at.desc()))
+    config = result.scalars().first()
+    
+    if not config:
+        # Fallback to settings
+        from app.core.config import settings
+        from datetime import datetime
+        return {
+            "url": settings.jira_url,
+            "email": settings.jira_email,
+            "project_key": settings.jira_project_key,
+            "is_active": True,
+            "updated_at": datetime.utcnow()
+        }
+        
+    return {
+        "url": config.jira_url,
+        "email": config.jira_email,
+        "project_key": config.default_project_key,
+        "is_active": config.is_active,
+        "updated_at": config.updated_at
+    }
+
+@router.post("/config", response_model=JiraConfigResponse)
+async def update_jira_config(
+    request: JiraConfigRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user = Depends(require_role(["admin"]))
+):
+    """Update Jira configuration (Admin only)"""
+    encrypted_token = encrypt_api_key(request.api_token)
+    
+    # Check if we have an existing config
+    result = await db.execute(select(JiraConfiguration))
+    config = result.scalars().first()
+    
+    if config:
+        config.jira_url = request.url
+        config.jira_email = request.email
+        config.jira_api_token_encrypted = encrypted_token
+        config.default_project_key = request.project_key
+    else:
+        config = JiraConfiguration(
+            jira_url=request.url,
+            jira_email=request.email,
+            jira_api_token_encrypted=encrypted_token,
+            default_project_key=request.project_key
+        )
+        db.add(config)
+    
+    # Commit is handled by get_db dependency if it's yielding
+    # But wait, our get_db in deps.py is a generator.
+    # Actually, let's just use it.
+    
+    await db.commit()
+    await db.refresh(config)
+    
+    return {
+        "url": config.jira_url,
+        "email": config.jira_email,
+        "project_key": config.default_project_key,
+        "is_active": config.is_active,
+        "updated_at": config.updated_at
+    }
+
 
 @router.get("/issue-types/{project_key}")
 async def get_issue_types(
@@ -228,6 +305,10 @@ async def handle_jira_webhook(
     Triggered when an issue is created.
     """
     try:
+        from app.core.database import get_db_context
+        from app.models.database import JiraConfiguration
+        from sqlalchemy import select
+
         event = payload.get("webhookEvent")
         
         # We only care about issue_created
@@ -240,16 +321,30 @@ async def handle_jira_webhook(
         issue_key = issue.get("key")
         issue_id = issue.get("id")
         issue_type = fields.get("issuetype", {}).get("name")
+        project_key_received = fields.get("project", {}).get("key")
         
         if not issue_key:
             return {"status": "ignored", "reason": "No issue key found"}
+
+        # Fetch Default Project Key from Config
+        target_project_key = settings.jira_project_key
+        async with get_db_context() as db:
+            result = await db.execute(select(JiraConfiguration).order_by(JiraConfiguration.updated_at.desc()))
+            db_config = result.scalars().first()
+            if db_config and db_config.default_project_key:
+                target_project_key = db_config.default_project_key
+
+        # Filter by Project Key if target exists
+        if target_project_key and project_key_received != target_project_key:
+            logger.info(f"Ignoring webhook for {issue_key}: Project {project_key_received} != {target_project_key}")
+            return {"status": "ignored", "reason": f"Project {project_key_received} not monitored"}
             
         # Filter for Stories only (or configure as needed)
         if issue_type != "Story":
             logger.info(f"Ignoring webhook for issue {issue_key}: Type is {issue_type}, expected Story")
             return {"status": "ignored", "reason": f"Type {issue_type} not supported"}
             
-        logger.info(f"Received webhook for new story: {issue_key}. Triggering pipeline.")
+        logger.info(f"Received webhook for new story: {issue_key} in project {project_key_received}. Triggering pipeline.")
         
         # Trigger background task
         background_tasks.add_task(process_webhook_background, issue_id, issue_key)

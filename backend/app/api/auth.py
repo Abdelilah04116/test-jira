@@ -30,6 +30,7 @@ from app.models.schemas import (
 from app.models.database import User
 from app.api.deps import get_current_user, check_rate_limit
 from app.core.config import settings
+from app.services.audit import audit_service
 
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -77,6 +78,14 @@ async def register_user(
     await db.refresh(new_user)
     
     logger.info(f"New user registered: {new_user.email}")
+    
+    await audit_service.log(
+        action="USER_REGISTRATION",
+        user_id=new_user.id,
+        resource_type="User",
+        resource_id=str(new_user.id),
+        details={"email": new_user.email, "role": new_user.role.value}
+    )
     
     return UserResponse(
         id=str(new_user.id),
@@ -135,6 +144,14 @@ async def login(
     refresh_token = create_refresh_token(token_data)
     
     logger.info(f"User logged in: {user.email}")
+    
+    await audit_service.log(
+        action="LOGIN_SUCCESS",
+        user_id=user.id,
+        resource_type="Auth",
+        resource_id=str(user.id),
+        details={"email": user.email}
+    )
     
     return Token(
         access_token=access_token,

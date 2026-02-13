@@ -34,6 +34,7 @@ class TestScenarioType(str, Enum):
     EDGE_CASE = "edge_case"
     SECURITY = "security"
     PERFORMANCE = "performance"
+    DATA_DRIVEN = "data-driven"
 
 
 class JiraPublishMode(str, Enum):
@@ -377,6 +378,25 @@ class JiraPublishResponse(BaseModel):
     created_subtasks: List[Dict[str, str]] = Field(default_factory=list)
     jira_link: str
     message: str
+
+
+class JiraConfigRequest(BaseModel):
+    """Jira configuration request"""
+    url: str = Field(..., description="Jira instance URL")
+    email: str = Field(..., description="Jira user email")
+    api_token: str = Field(..., description="Jira API token")
+    project_key: Optional[str] = Field(None, description="Default project key")
+
+class JiraConfigResponse(BaseModel):
+    """Jira configuration response"""
+    url: str
+    email: str
+    project_key: Optional[str]
+    is_active: bool
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 # =============================================================================

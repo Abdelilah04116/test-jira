@@ -329,6 +329,14 @@ class QAGeneratorService:
             f"in {processing_time:.2f}s"
         )
         
+        await audit_service.log(
+            action="generate_test_scenarios",
+            user_id=request.user_id if hasattr(request, 'user_id') else None,
+            resource_type="test_suite",
+            resource_id=story_key,
+            details={"scenarios_count": len(scenarios)}
+        )
+        
         return GenerateTestScenariosResponse(
             success=True,
             story_key=story_key,
@@ -404,6 +412,17 @@ class QAGeneratorService:
             message_parts.append(
                 f"{len(results['subtasks'])} test scenarios published"
             )
+        
+        await audit_service.log(
+            action="jira_sync",
+            resource_type="jira_issue",
+            resource_id=request.issue_id,
+            details={
+                "ac_published": results["ac_published"],
+                "tests_published": results["tests_published"],
+                "subtasks_count": len(results["subtasks"])
+            }
+        )
         
         return JiraPublishResponse(
             success=success,

@@ -190,6 +190,7 @@ async def push_to_git(
     
     issue_id = request.get("issue_id")
     test_suite = request.get("test_suite")
+    provider = request.get("provider", "github")
     
     if not issue_id:
         raise HTTPException(status_code=400, detail="issue_id is required")
@@ -211,6 +212,18 @@ async def push_to_git(
     ]
     
     if not pushable:
+        # If no code in request, try to find local files
+        gitops = GitOpsAgent()
+        story_dir = gitops.workspace_base / issue_id.lower().replace("-", "_")
+        if story_dir.exists():
+            for spec_file in story_dir.glob("*.spec.ts"):
+                pushable.append({
+                    "id": spec_file.name.split("_")[0],
+                    "title": spec_file.name.split("_")[1].replace(".spec.ts", ""),
+                    "playwright_code": "local_file", # placeholder to signify we have files
+                })
+
+    if not pushable:
         raise HTTPException(
             status_code=400,
             detail="No scenarios with valid Playwright code to push"
@@ -219,45 +232,57 @@ async def push_to_git(
     gitops = GitOpsAgent()
     
     try:
-        # Step 1: Write test files
-        write_result = await gitops.write_test_files(
-            story_key=issue_id,
-            scenarios=pushable
-        )
+        # Step 1: Write test files (only if we have real code in request)
+        files_created = []
+        real_code_scenarios = [s for s in pushable if s["playwright_code"] != "local_file"]
         
-        if not write_result["success"]:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to write test files: {write_result.get('errors', [])}"
+        if real_code_scenarios:
+            write_result = await gitops.write_test_files(
+                story_key=issue_id,
+                scenarios=real_code_scenarios
             )
-        
+            if not write_result["success"]:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to write test files: {write_result.get('errors', [])}"
+                )
+            files_created = write_result["files_created"]
+        else:
+            # Assume files are already there if no code sent
+            files_created = [{"filename": f.name} for f in (gitops.workspace_base / issue_id.lower().replace("-", "_")).glob("*.spec.ts")]
+
         # Step 2: Git commit & push
         push_result = await gitops.git_commit_and_push(
             story_key=issue_id,
-            files_created=write_result["files_created"]
+            files_created=files_created,
+            provider=provider
         )
         
         logger.info(
-            f"User {current_user.email} pushed {len(pushable)} test files "
-            f"for {issue_id} to Git"
+            f"User {current_user.email} pushed {len(files_created)} test files "
+            f"for {issue_id} to {provider}"
         )
         
+        if not push_result["success"]:
+            raise HTTPException(
+                status_code=500,
+                detail=push_result.get("error", "Unknown Git push error")
+            )
+            
         return {
-            "success": push_result["success"],
+            "success": True,
             "issue_id": issue_id,
-            "files_written": len(write_result["files_created"]),
+            "provider": provider,
             "files_pushed": push_result["files_pushed"],
             "branch": push_result["branch"],
             "commit_hash": push_result.get("commit_hash"),
-            "repo_url": push_result.get("repo_url"),
-            "error": push_result.get("error"),
-            "write_errors": write_result.get("errors", []),
+            "repo_url": push_result.get("repo_url")
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Push to Git failed: {e}")
+        logger.error(f"Push to {provider} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -286,7 +311,6 @@ async def run_agentic_pipeline(
     - **llm_provider**: Override default LLM provider (optional)
     
     The pipeline runs in the **background** and returns immediately.
-    Use `/generate/pipeline-status` to check progress.
     """
     from app.agents.orchestrator import OrchestratorAgent
     from app.core.config import settings
@@ -326,6 +350,35 @@ async def run_agentic_pipeline(
             "GitOps"
         ]
     }
+
+
+@router.post("/agentic-pipeline-sync")
+async def run_agentic_pipeline_sync(
+    request: FullPipelineRequest,
+    current_user = Depends(get_current_user),
+    _: None = Depends(check_rate_limit)
+):
+    """
+    Run the full **Multi-Agent Agentic Pipeline** synchronously.
+    
+    This is used for immediate feedback in the UI to display generated code before pushing.
+    """
+    from app.agents.orchestrator import OrchestratorAgent
+    from app.core.config import settings
+    
+    orchestrator = OrchestratorAgent(
+        llm_provider=request.llm_provider.value if request.llm_provider else None
+    )
+    try:
+        result = await orchestrator.run_full_agentic_pipeline(
+            issue_id=request.issue_id,
+            user_id=current_user.sub,
+            auto_publish=request.auto_publish,
+            auto_push_git=False, # We'll push manually from the UI
+        )
+        return result
+    finally:
+        await orchestrator.jira_client.close()
 
 
 @router.get("/providers")

@@ -88,33 +88,47 @@ def require_role(allowed_roles: list[str]):
     return check_role
 
 
-async def get_jira_client() -> JiraClient:
+async def get_jira_client(db: AsyncSession = Depends(get_db)) -> JiraClient:
     """
-    Get configured Jira client
-    
-    Returns:
-        JiraClient instance
-    
-    Raises:
-        HTTPException: If Jira is not configured
+    Get configured Jira client from DB or environment
     """
     from loguru import logger
+    from sqlalchemy import select
+    from app.models.database import JiraConfiguration
+    from app.core.security import decrypt_api_key
     
-    # Debug logging (masked)
-    url_ok = settings.jira_url and "your-instance" not in settings.jira_url
-    token_ok = settings.jira_api_token and "your-jira-api-token" not in settings.jira_api_token
+    # Try fetching from DB first
+    result = await db.execute(select(JiraConfiguration).order_by(JiraConfiguration.updated_at.desc()))
+    db_config = result.scalars().first()
     
-    if not url_ok or not token_ok:
-        logger.warning(f"Jira config check failed: URL_OK={url_ok}, TOKEN_OK={token_ok}")
-        logger.warning(f"Settings JIRA_URL: {settings.jira_url[:15]}...")
-        
+    url = settings.jira_url
+    email = settings.jira_email
+    token = settings.jira_api_token
+    
+    if db_config:
+        url = db_config.jira_url
+        email = db_config.jira_email
+        try:
+            token = decrypt_api_key(db_config.jira_api_token_encrypted)
+        except Exception as e:
+            logger.error(f"Failed to decrypt Jira token from DB: {e}")
+            # Fallback to token if it exists (though unlikely to work if decryption fails)
+    
+    # Basic validation
+    url_ok = url and "your-instance" not in url
+    token_ok = token and "your-jira-api-token" not in token
+    
     if not (url_ok and token_ok):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Jira integration is not configured. Please update your .env file."
+            detail="Jira integration is not configured. Please visit the Jira Integration settings page."
         )
     
-    return JiraClient()
+    project_key = settings.jira_project_key
+    if db_config:
+        project_key = db_config.default_project_key
+
+    return JiraClient(url=url, email=email, api_token=token, project_key=project_key)
 
 
 async def get_generator_service(

@@ -33,4 +33,28 @@ class AuditService:
         except Exception as e:
             logger.error(f"Failed to create audit log: {e}")
 
+    @staticmethod
+    async def list_logs(
+        skip: int = 0,
+        limit: int = 50,
+        action: Optional[str] = None,
+        status: Optional[str] = None
+    ):
+        """Retrieve audit logs with filtering and pagination"""
+        try:
+            from sqlalchemy import select, desc
+            async with get_db_context() as db:
+                query = select(AuditLog).order_by(desc(AuditLog.created_at)).offset(skip).limit(limit)
+                
+                if action:
+                    query = query.filter(AuditLog.action == action)
+                if status:
+                    query = query.filter(AuditLog.status == status)
+                    
+                result = await db.execute(query)
+                return result.scalars().all()
+        except Exception as e:
+            logger.error(f"Failed to fetch audit logs: {e}")
+            return []
+
 audit_service = AuditService()

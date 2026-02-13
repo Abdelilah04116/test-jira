@@ -11,8 +11,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from loguru import logger
-import sys
 import os
+import sys
+import asyncio
+
+# Windows-specific fix for 'NotImplementedError' when using asyncio subprocesses
+# This must be set beforeAny loop is created
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+# Fix for missing aiohttp.ClientConnectorDNSError in older versions or specific environments
+# This must be done as early as possible
+try:
+    import aiohttp
+    if not hasattr(aiohttp, "ClientConnectorDNSError"):
+        try:
+            from aiohttp import client_exceptions
+            if hasattr(client_exceptions, "ClientConnectorDNSError"):
+                aiohttp.ClientConnectorDNSError = client_exceptions.ClientConnectorDNSError
+            else:
+                class MockClientConnectorDNSError(OSError): pass
+                aiohttp.ClientConnectorDNSError = MockClientConnectorDNSError
+        except ImportError:
+             class MockClientConnectorDNSError(OSError): pass
+             aiohttp.ClientConnectorDNSError = MockClientConnectorDNSError
+except ImportError:
+    pass # app will likely fail later if aiohttp is missing, but this patch is just for the specific error
+
 
 # Fix for common Windows initialization error: invalid TLS bundle path
 # Often caused by PostgreSQL setting global environment variables

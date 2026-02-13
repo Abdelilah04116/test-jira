@@ -10,6 +10,7 @@ from app.api.jira import router as jira_router
 from app.api.generate import router as generate_router
 from app.api.analytics import router as analytics_router
 from app.api.webhooks import router as webhooks_router
+from app.api.system import router as system_router
 
 
 # Create main API router
@@ -21,6 +22,7 @@ api_router.include_router(jira_router)
 api_router.include_router(generate_router)
 api_router.include_router(analytics_router)
 api_router.include_router(webhooks_router)
+api_router.include_router(system_router)
 
 
 # Health check endpoint at root level
